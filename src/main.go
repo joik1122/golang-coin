@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"strconv"
 
 	"github.com/labstack/gommon/log"
 )
@@ -16,6 +17,9 @@ func main() {
 		log.Infof("Prev. hash: %x", block.PrevBlockHash)
 		log.Infof("Data: %s", block.Data)
 		log.Infof("Hash: %x", block.Hash)
+
+		pow := NewProofOfWork(block)
+		log.Infof("PoW: %s\n", strconv.FormatBool(pow.Validate()))
 		fmt.Println()
 	}
 }

@@ -1,9 +1,6 @@
 package main
 
 import (
-	"bytes"
-	"crypto/sha256"
-	"strconv"
 	"time"
 )
 
@@ -13,20 +10,17 @@ type Block struct {
 	Data          []byte // 실질적인 데이터
 	PrevBlockHash []byte // 이전 블록의 해시
 	Hash          []byte // 현재 블록의 해시
-}
-
-// 해시는 block 생성을 어렵게 해 block이 생성된 후 다시 내부 내용을 수정하지 못하도록 설계됨
-func (b *Block) SetHash() {
-	timestamp := []byte(strconv.FormatInt(b.Timestamp, 10))
-	headers := bytes.Join([][]byte{b.PrevBlockHash, b.Data, timestamp}, []byte{})
-	hash := sha256.Sum256(headers)
-
-	b.Hash = hash[:]
+	Nonce         int    // 채굴 과정에서 생성된 해시값을 찾기 위한 카운터
 }
 
 func NewBlock(data string, prevBlockHash []byte) *Block {
-	block := &Block{time.Now().Unix(), []byte(data), prevBlockHash, []byte{}}
-	block.SetHash()
+	block := &Block{time.Now().Unix(), []byte(data), prevBlockHash, []byte{}, 0}
+	pow := NewProofOfWork(block)
+	nonce, hash := pow.Run()
+
+	block.Hash = hash[:]
+	block.Nonce = nonce
+
 	return block
 }
 
