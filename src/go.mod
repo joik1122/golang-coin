@@ -5,6 +5,7 @@ go 1.20
 require github.com/labstack/gommon v0.4.2
 
 require (
+	github.com/boltdb/bolt v1.3.1 // indirect
 	github.com/mattn/go-colorable v0.1.13 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/valyala/bytebufferpool v1.0.0 // indirect
