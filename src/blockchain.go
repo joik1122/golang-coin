@@ -1,30 +1,19 @@
 package main
 
 import (
-	"bytes"
-	"encoding/gob"
+	"encoding/hex"
 	"fmt"
 	"log"
-	"strconv"
-	"time"
 
 	"github.com/boltdb/bolt"
 )
-
-type Block struct {
-	TimeStamp int32  `validate:"required"`
-	Hash      []byte `validate:"required"`
-	PrevHash  []byte `validate:"required"`
-	Data      []byte `validate:"required"`
-	Nonce     int    `validate:"min=0"`
-}
 
 type Blockchain struct {
 	db   *bolt.DB
 	last []byte
 }
 
-type BlockchainTmp struct {
+type BlockchainIterator struct {
 	db          *bolt.DB
 	currentHash []byte
 }
@@ -33,12 +22,8 @@ const dbFile = "houchain_%s.db"
 
 var Bc *Blockchain
 
-func generateGenesis() *Block {
-	return NewBlock("Genesis Block", []byte{})
-}
-
 // Get All Blockchains
-func GetBlockchain() *Blockchain {
+func GetBlockchain(address string) *Blockchain {
 	var last []byte
 
 	dbFile := fmt.Sprintf(dbFile, "0600")
@@ -50,19 +35,19 @@ func GetBlockchain() *Blockchain {
 	err = db.Update(func(tx *bolt.Tx) error {
 		bc := tx.Bucket([]byte("blocks"))
 		if bc == nil {
-			genesis := generateGenesis()
-			fmt.Println("Generate Genesis block")
+			cb := NewCoinbaseTX(address, "init base")
+			genesis := GenerateGenesis(cb)
 			b, err := tx.CreateBucket([]byte("blocks"))
 			if err != nil {
-				return err
+				log.Fatal(err)
 			}
 			err = b.Put(genesis.Hash, genesis.Serialize())
 			if err != nil {
-				return err
+				log.Fatal(err)
 			}
 			err = b.Put([]byte("last"), genesis.Hash)
 			if err != nil {
-				return err
+				log.Fatal(err)
 			}
 			last = genesis.Hash
 		} else {
@@ -78,20 +63,8 @@ func GetBlockchain() *Blockchain {
 	return &bc
 }
 
-// Prepare new block
-func NewBlock(data string, prevHash []byte) *Block {
-	newblock := &Block{int32(time.Now().Unix()), nil, prevHash, []byte(data), 0}
-	pow := NewProofOfWork(newblock)
-	nonce, hash := pow.Run()
-
-	newblock.Hash = hash[:]
-	newblock.Nonce = nonce
-	return newblock
-}
-
-// add to boltDB
 // Add Blockchain
-func (bc *Blockchain) AddBlock(data string) {
+func (bc *Blockchain) AddBlock(transactions []*Transaction) {
 	var lastHash []byte
 
 	err := bc.db.View(func(tx *bolt.Tx) error {
@@ -104,7 +77,7 @@ func (bc *Blockchain) AddBlock(data string) {
 		log.Panic(err)
 	}
 
-	newBlock := NewBlock(data, lastHash)
+	newBlock := NewBlock(transactions, lastHash)
 
 	err = bc.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte("blocks"))
@@ -129,41 +102,19 @@ func (bc *Blockchain) AddBlock(data string) {
 	}
 }
 
-// Show Blockchains
-func (bc Blockchain) ShowBlocks() {
-	bcT := bc.Iterator()
-
-	for {
-		block := bcT.getNextBlock()
-		pow := NewProofOfWork(block)
-
-		fmt.Println("\nTimeStamp:", block.TimeStamp)
-		fmt.Printf("Data: %s\n", block.Data)
-		fmt.Printf("Hash: %x\n", block.Hash)
-		fmt.Printf("Prev Hash: %x\n", block.PrevHash)
-		fmt.Printf("Nonce: %d\n", block.Nonce)
-
-		fmt.Printf("is Validated: %s\n", strconv.FormatBool(pow.Validate()))
-
-		if len(block.PrevHash) == 0 {
-			break
-		}
-	}
-}
-
 // Blockchain iterator
-func (bc *Blockchain) Iterator() *BlockchainTmp {
-	bcT := &BlockchainTmp{bc.db, bc.last}
+func (bc *Blockchain) Iterator() *BlockchainIterator {
+	bcI := &BlockchainIterator{bc.db, bc.last}
 
-	return bcT
+	return bcI
 }
 
-func (bct *BlockchainTmp) getNextBlock() *Block {
+func (bcI *BlockchainIterator) getNextBlock() *Block {
 	var block *Block
 
-	err := bct.db.View(func(tx *bolt.Tx) error {
+	err := bcI.db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte("blocks"))
-		encodedBlock := b.Get(bct.currentHash)
+		encodedBlock := b.Get(bcI.currentHash)
 		block = DeserializeBlock(encodedBlock)
 
 		return nil
@@ -172,32 +123,85 @@ func (bct *BlockchainTmp) getNextBlock() *Block {
 		log.Panic(err)
 	}
 
-	bct.currentHash = block.PrevHash
+	bcI.currentHash = block.PrevHash
 	return block
 }
 
-// Serialize before sending
-func (b *Block) Serialize() []byte {
-	var value bytes.Buffer
+// Returns a list of transactions containing unspent outputs
+func (bc *Blockchain) FindUnspentTxs(address string) []*Transaction {
+	// 반환할 미사용 트랜잭션들
+	var unspentTXs []*Transaction
+	// 이미 사용된 출력들
+	spentTXOs := make(map[string][]int)
+	bcI := bc.Iterator()
 
-	encoder := gob.NewEncoder(&value)
-	err := encoder.Encode(b)
-	if err != nil {
-		log.Fatal("Encode Error:", err)
+	// 블록 순회
+	for {
+		block := bcI.getNextBlock()
+
+		for _, tx := range block.Transactions {
+			txID := hex.EncodeToString(tx.ID)
+
+		Outputs:
+			for outIndex, out := range tx.Txout {
+				if spentTXOs[txID] != nil {
+					for _, spentOut := range spentTXOs[txID] {
+						// 현재 탐색중인 tx에 이미 소비된 출력이 있는지 확인
+						if spentOut == outIndex {
+							// 이미 소비된 출력이면 다음 출력으로 넘어감
+							continue Outputs
+						}
+					}
+				}
+
+				// 출력의 스크립트에 저장된 주소는 해당 주소로 코인이 전송된 것
+				if out.ScriptPubKey == address {
+					unspentTXs = append(unspentTXs, tx)
+					continue Outputs
+				}
+			}
+
+			if !tx.IsCoinbase() {
+				// 입력 탐색
+				for _, in := range tx.Txin {
+					// 해당 입력이 참조한 출력을 찾아서 소비된 출력 목록에 추가
+					if in.ScriptSig == address {
+						inTxID := hex.EncodeToString(in.Txid)
+						spentTXOs[inTxID] = append(spentTXOs[inTxID], in.TxoutIdx)
+					}
+				}
+			}
+		}
+
+		if len(block.PrevHash) == 0 {
+			break
+		}
 	}
-
-	return value.Bytes()
+	return unspentTXs
 }
 
-// Deserialize block(not a method)
-func DeserializeBlock(d []byte) *Block {
-	var block Block
+// Finds and returns unspend transaction outputs for the address
+func (bc *Blockchain) FindUTXOs(address string, amount int) (int, map[string][]int) {
+	unspentOutputs := make(map[string][]int)
+	unspentTXs := bc.FindUnspentTxs(address)
+	accumulated := 0
 
-	decoder := gob.NewDecoder(bytes.NewReader(d))
-	err := decoder.Decode(&block)
-	if err != nil {
-		log.Fatal("Decode Error:", err)
+	// 모든 미사용 트랜잭션을 순회하면서 값을 누적
+Work:
+	for _, tx := range unspentTXs {
+		txID := hex.EncodeToString(tx.ID)
+
+		for index, txout := range tx.Txout {
+			// 송금하려는 양이 누적량보다 많거나 같아지면 루프 탈출
+			if txout.ScriptPubKey == address && accumulated < amount {
+				accumulated += txout.Value
+				unspentOutputs[txID] = append(unspentOutputs[txID], index)
+				if accumulated >= amount {
+					break Work
+				}
+			}
+		}
 	}
 
-	return &block
+	return accumulated, unspentOutputs
 }
